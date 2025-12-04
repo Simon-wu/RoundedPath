@@ -48,11 +48,11 @@ const pathPoints = [
 ];
 
 const trafficData = [
-    { start: 0.0, end: 0.2, color: new THREE.Color(0x00ff00) },
+    { start: 0.0, end: 0.2, color: new THREE.Color(0xff0000) },
     { start: 0.2, end: 0.4, color: new THREE.Color(0xffcc00) },
     { start: 0.4, end: 0.6, color: new THREE.Color(0xff0000) },
     { start: 0.6, end: 0.8, color: new THREE.Color(0xffcc00) },
-    { start: 0.8, end: 1.0, color: new THREE.Color(0x00ff00) },
+    { start: 0.8, end: 1.0, color: new THREE.Color(0xff0000) },
 ];
 
 // --- Create NavLine ---
