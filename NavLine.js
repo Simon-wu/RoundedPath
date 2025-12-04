@@ -372,10 +372,7 @@ export class NavLine {
         
         // 1. 更新动画偏移
         // 假设 speed 是 "像素/秒" (例如 60 px/s)
-        // 或者保留物理单位，这里为了视觉一致性，建议 speed 视为 screen pixels per second
-        // 如果想保留物理速度感，需要做复杂换算。这里简化为 Screen Speed.
-        // 为了让用户感觉是“以一定速度前进”，我们把 speed * dt 累加
-        const pxSpeed = 100.0; // 这里的 speed 变成了 像素/秒
+        const pxSpeed = 100.0; 
         this._accumulatedTime += deltaTime * pxSpeed; 
         this.material.uniforms.uOffset.value = this._accumulatedTime;
 
@@ -405,36 +402,43 @@ export class NavLine {
         
         let accumulatedDist = 0;
         let prevScreenPos = new THREE.Vector2();
+        let prevValid = false;
 
         for (let i = 0; i < count; i++) {
-            // 复制点坐标并投影
+            // 复制点坐标并应用视图矩阵
             vec.copy(points[i]);
-            vec.applyMatrix4(camera.matrixWorldInverse); // View Space
+            vec.applyMatrix4(camera.matrixWorldInverse); 
             
-            // 简单的背面剔除处理：如果点在相机后面，可能会导致投影错误
-            // 这里我们不做复杂裁剪，只做简单投影。Three.js project 会处理一部分
-            vec.applyMatrix4(camera.projectionMatrix); // NDC
+            // 检查点是否在相机后面 (View Space 中, 相机看向 -Z, 所以 Z > 0 是后面)
+            // 留一点 buffer (-0.1) 避免近裁面的闪烁
+            const isBehind = vec.z > -0.1;
+            
+            // 投影到 NDC
+            vec.applyMatrix4(camera.projectionMatrix); 
 
+            // 计算屏幕坐标
             const screenX = vec.x * halfW + halfW;
             const screenY = vec.y * halfH + halfH;
 
+            // 如果点在相机后面，我们不累加距离，但我们需要填充属性以防 crash
+            // 更重要的是，如果当前点或上一个点在相机后面，两点之间的屏幕距离是无效的
             if (i > 0) {
-                // 计算屏幕像素距离
-                const dx = screenX - prevScreenPos.x;
-                const dy = screenY - prevScreenPos.y;
-                // 如果距离突变（例如从前面跳到后面），可以加阈值保护
-                const dist = Math.sqrt(dx*dx + dy*dy);
-                accumulatedDist += dist;
+                if (!isBehind && prevValid) {
+                    const dx = screenX - prevScreenPos.x;
+                    const dy = screenY - prevScreenPos.y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    accumulatedDist += dist;
+                } else {
+                    // 如果跨越了相机平面，或者在后面，保持距离不变
+                    // 这会“冻结”不可见部分的纹理坐标，防止无限大数值导致整个纹理闪烁
+                }
             }
 
             prevScreenPos.set(screenX, screenY);
+            prevValid = !isBehind;
 
             // 更新 Mesh 属性
-            // 每个点对应 2 个顶点 (Left/Right)
-            // 索引偏移量是 this._bodyVertexStart
             const idx = this._bodyVertexStart + i * 2;
-            
-            // 设置 Left 和 Right 顶点的 screenDist
             array[idx] = accumulatedDist;
             array[idx + 1] = accumulatedDist;
         }
