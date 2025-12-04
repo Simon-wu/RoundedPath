@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
 import { NavLine } from './NavLine.js';
 
 // --- Scene Setup ---
@@ -57,12 +58,27 @@ const trafficData = [
 // --- Create NavLine ---
 const navLine = new NavLine(scene, pathPoints, {
     width: 20.0,       // 屏幕像素宽度
-    arrowSpacing: 60,  // [变更] 屏幕像素间距 (建议 3-4倍线宽)
-    speed: 5,          // 速度系数
+    arrowSpacing: 10.0, // 世界单位(米)间距
+    speed: 18.0,        // 米/秒
     trafficData: trafficData,
     zOffset: 0.5,
     cornerRadius: 15
 });
+
+// --- GUI Controller ---
+const gui = new GUI();
+const settings = {
+    lodBias: 1.0,
+    spacing: 10.0
+};
+
+gui.add(settings, 'lodBias', 0.1, 3.0)
+    .name('LOD Fade (Cleanliness)')
+    .onChange(v => navLine.setLodBias(v));
+
+gui.add(settings, 'spacing', 5.0, 30.0)
+    .name('Arrow Spacing (m)')
+    .onChange(v => navLine.setArrowSpacing(v));
 
 // --- Mock Environment ---
 const boxGeo = new THREE.BoxGeometry(2, 2, 10);
@@ -83,8 +99,7 @@ function animate() {
     
     controls.update();
     
-    // [关键] 传入 camera 用于计算屏幕空间间距
-    navLine.update(delta, camera);
+    navLine.update(delta);
     
     renderer.render(scene, camera);
 }
@@ -94,7 +109,7 @@ window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-    navLine.update(0, camera); 
+    navLine.update(0); 
 });
 
 animate();

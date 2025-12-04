@@ -7,7 +7,6 @@ let _cachedArrowTexture = null;
 function getArrowTexture(anisotropy = 16) {
     if (_cachedArrowTexture) return _cachedArrowTexture;
 
-    // 提高分辨率以获得更精细的效果
     const size = 512;
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -16,28 +15,37 @@ function getArrowTexture(anisotropy = 16) {
 
     ctx.clearRect(0, 0, size, size);
 
-    const padding = size * 0.2;
+    // 绘制箭头
+    // 为了适应 1:1 的正方形比例，我们调整箭头的大小和位置
+    const padding = size * 0.15;
+    const w = size - padding * 2;
     const h = size - padding * 2;
+    const cx = size / 2;
     const cy = size / 2;
 
-    // 绘制更锐利的箭头
     ctx.strokeStyle = 'white';
-    ctx.lineWidth = size * 0.15;
+    ctx.lineWidth = size * 0.15; // 加粗一点
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     
-    // 稍微调整箭头形状使其更紧凑
+    // 画一个标准的向右箭头
     ctx.beginPath();
-    ctx.moveTo(padding, cy - h * 0.35);
-    ctx.lineTo(size - padding, cy);
-    ctx.lineTo(padding, cy + h * 0.35);
+    // 顶点
+    const headX = size - padding;
+    const tailX = padding;
+    const arrowWidth = h * 0.6; // 箭头张开的宽度
+
+    ctx.moveTo(tailX, cy - arrowWidth * 0.6);
+    ctx.lineTo(headX, cy);
+    ctx.lineTo(tailX, cy + arrowWidth * 0.6);
     ctx.stroke();
 
     const texture = new THREE.CanvasTexture(canvas);
-    // 使用线性滤镜减少缩小时的闪烁
+    // 使用线性滤镜，保证缩放平滑
     texture.minFilter = THREE.LinearMipMapLinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.wrapS = THREE.RepeatWrapping;
+    // 关键：边缘截断，防止 UV 计算溢出时出现杂色
+    texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.anisotropy = anisotropy;
     
@@ -45,40 +53,29 @@ function getArrowTexture(anisotropy = 16) {
     return texture;
 }
 
-/**
- * NavLine 类
- * 实现了屏幕空间宽度的导航线，并且箭头的间隔也是屏幕空间均匀的。
- */
 export class NavLine {
     constructor(scene, points, config = {}) {
         this.scene = scene;
-        this.originalPoints = points; // 保存原始拐点
+        this.originalPoints = points;
         
-        // 合并配置
         this.config = Object.assign({
-            width: 20.0,         // [屏幕像素] 线宽
-            arrowSpacing: 60.0,  // [屏幕像素] 箭头间距 (注意单位变化！)
-            speed: 2.0,          // [屏幕像素/帧] 流动速度 (改为像素单位更易控，或者保留米/秒并在update转换)
+            width: 20.0,         // [屏幕像素] 线宽 (也是箭头的大小)
+            arrowSpacing: 10.0,  // [世界单位/米] 箭头中心之间的物理间距
+            speed: 5.0,          // [米/秒] 流动速度
             trafficData: [],
             zOffset: 0.5,
             cornerRadius: 15.0
         }, config);
 
-        // 速度我们还是保留米/秒的逻辑，但在 update 中我们会动态计算它对应的像素速度
-        // 或者简单点，我们让 speed 代表 "流动快慢系数"
-        
         if (config.yOffset !== undefined) {
             this.config.zOffset = config.yOffset;
         }
 
         this.mesh = null;
         this.material = null;
-        this._accumulatedTime = 0; // 这里的 Time 我们将累积为“屏幕像素偏移量”
+        this._accumulatedTime = 0;
         this._resolution = new THREE.Vector2(window.innerWidth, window.innerHeight);
         
-        // 缓存生成的中心路径点，用于 CPU 投影计算
-        this._curvePoints = [];
-
         this._init();
     }
 
@@ -92,47 +89,43 @@ export class NavLine {
             uniforms: {
                 uTexture: { value: texture },
                 uWidth: { value: this.config.width }, // Pixels
-                uSpacing: { value: this.config.arrowSpacing }, // Pixels
-                uOffset: { value: 0 }, // Pixels (Animation)
+                uSpacing: { value: this.config.arrowSpacing }, // Meters
+                uOffset: { value: 0 }, // Meters
                 uResolution: { value: this._resolution },
+                uLodBias: { value: 1.0 } // 1.0 = Default, Higher = Cleaner (Fades sooner), Lower = Busier
             },
             vertexShader: `
                 uniform vec2 uResolution;
                 uniform float uWidth;
                 
                 attribute vec3 aTangent;
-                attribute vec2 aOffset; // x: side, y: forward
-                attribute float aScreenDist; // 预计算的屏幕距离 (Pixels)
-                attribute vec3 aColor;      // 顶点颜色
+                attribute vec2 aOffset;
+                attribute float aPathDist; // 世界路径距离 (Meters)
+                attribute vec3 aColor;
                 attribute float aIsCap;
                 
                 varying vec2 vUv;
                 varying vec3 vColor;
-                varying float vScreenDist;
+                varying float vPathDist;
                 varying float vIsCap;
 
                 void main() {
                     vUv = uv;
                     vColor = aColor;
-                    vScreenDist = aScreenDist;
+                    vPathDist = aPathDist;
                     vIsCap = aIsCap;
                     
-                    // 1. Clip Space
+                    // Standard Screen-Space Line extrusion
                     vec4 clipCenter = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
                     vec4 clipTangent = projectionMatrix * modelViewMatrix * vec4(position + aTangent, 1.0);
 
-                    // 2. NDC
                     vec2 ndcCenter = clipCenter.xy / clipCenter.w;
                     vec2 ndcTangent = clipTangent.xy / clipTangent.w;
 
-                    // 3. Screen Space Tangent & Normal
                     vec2 screenDir = normalize((ndcTangent - ndcCenter) * uResolution);
                     vec2 screenNormal = vec2(-screenDir.y, screenDir.x);
 
-                    // 4. Pixel Offset
                     vec2 pixelOffset = (screenNormal * aOffset.x + screenDir * aOffset.y) * uWidth * 0.5;
-
-                    // 5. Back to Clip Delta
                     vec2 clipOffset = (pixelOffset * 2.0 / uResolution) * clipCenter.w;
 
                     gl_Position = clipCenter;
@@ -141,79 +134,88 @@ export class NavLine {
             `,
             fragmentShader: `
                 uniform sampler2D uTexture;
-                uniform float uWidth;
-                uniform float uSpacing;
-                uniform float uOffset;
+                uniform float uWidth;   // Line Width in Pixels
+                uniform float uSpacing; // Arrow Spacing in Meters
+                uniform float uOffset;  // Animation Offset in Meters
+                uniform float uLodBias; // Bias for LOD fading
                 
                 varying vec2 vUv;
                 varying vec3 vColor;
-                varying float vScreenDist;
+                varying float vPathDist;
                 varying float vIsCap;
 
                 void main() {
-                    vec3 finalColor = vColor;
-                    vec3 white = vec3(1.0);
-                    
-                    // --- 1. 高质量抗锯齿边缘 (Anti-Aliased Edge) ---
-                    // 使用 fwidth 计算当前像素对应的 UV 变化率，实现完美的 smoothstep
-                    float distY = abs(vUv.y - 0.5) * 2.0; // 0 (center) -> 1 (edge)
-                    
-                    // 线条边缘虚化宽度 (对应约 1.5 像素)
-                    float edgeWidth = fwidth(vUv.y) * 1.5; 
-                    
-                    // 身体部分的边缘 alpha
+                    // --- 1. 线条边缘抗锯齿 ---
+                    float distY = abs(vUv.y - 0.5) * 2.0;
+                    float edgeWidth = fwidth(vUv.y) * 1.5;
                     float bodyAlpha = 1.0 - smoothstep(1.0 - edgeWidth, 1.0, distY);
-                    
-                    // 圆头部分的边缘 alpha
+
+                    // 圆头处理
                     if (vIsCap > 0.5) {
                         float r = length(vUv);
                         float capEdge = fwidth(r) * 1.5;
                         bodyAlpha = 1.0 - smoothstep(1.0 - capEdge, 1.0, r);
                     }
-
-                    // 如果完全透明则丢弃 (优化)
                     if (bodyAlpha < 0.01) discard;
 
-                    // --- 2. 屏幕空间箭头纹理 ---
-                    float arrowLayer = 0.0;
+                    // --- 2. 箭头渲染 (核心逻辑修复) ---
+                    float arrowAlpha = 0.0;
                     
-                    // 仅在身体部分绘制箭头 (vIsCap == 0)
                     if (vIsCap < 0.5) {
-                        // 计算当前像素在循环中的位置 (Pixels)
-                        // vScreenDist 是屏幕像素距离，uOffset 是动画偏移
-                        float currentDist = vScreenDist - uOffset;
-                        float distInCycle = mod(currentDist, uSpacing);
+                        // 计算当前像素代表多少米 (Meters Per Pixel)
+                        // fwidth(vPathDist) 告诉我们路径距离随屏幕像素变化的速度
+                        float mpp = fwidth(vPathDist);
+                        // 避免除以零
+                        mpp = max(mpp, 0.0001);
+
+                        // 确定当前位置相对于最近箭头的距离
+                        float currentDist = vPathDist - uOffset;
+                        // 计算该点属于第几个箭头周期
+                        float cycle = floor(currentDist / uSpacing + 0.5);
+                        // 最近箭头的中心位置 (Meters)
+                        float centerDist = cycle * uSpacing;
+                        // 当前像素距离箭头中心的物理距离 (Meters)
+                        float distMeters = currentDist - centerDist;
                         
-                        // 箭头的视觉尺寸设为线宽 (保持正方形比例)
-                        float arrowSize = uWidth;
+                        // 将物理距离转换为屏幕像素距离
+                        float distPixels = distMeters / mpp;
+
+                        // 计算纹理坐标
+                        // 我们希望箭头在屏幕上占据 uWidth 个像素宽
+                        // 所以 distPixels 在 [-uWidth/2, uWidth/2] 范围内时显示箭头
+                        // 映射到 UV [0, 1]
+                        float texX = 0.5 + distPixels / uWidth;
+
+                        // --- LOD (细节层次) ---
+                        // 计算两个箭头在屏幕上的像素间距
+                        float spacingPixels = uSpacing / mpp;
                         
-                        // 居中显示
-                        float halfGap = (uSpacing - arrowSize) * 0.5;
+                        // 计算 LOD 阈值
+                        // 默认: 当间距小于 1.2倍线宽时开始淡出，大于 2.5倍时完全显示
+                        // 乘以 uLodBias: 
+                        //   Bias 大 -> 需要更大的间距才显示 -> 箭头更早消失 (更干净)
+                        //   Bias 小 -> 允许更小的间距 -> 箭头更晚消失 (更密集)
+                        float minSpacing = uWidth * 1.2 * uLodBias;
+                        float maxSpacing = uWidth * 2.5 * uLodBias;
                         
-                        // 归一化纹理 X 坐标
-                        float texX = (distInCycle - halfGap) / arrowSize;
-                        
-                        // 采样纹理
-                        if (texX > 0.0 && texX < 1.0) {
-                            float texAlpha = texture2D(uTexture, vec2(texX, vUv.y)).a;
-                            
-                            // 同样使用 fwidth 对纹理内容进行抗锯齿，防止远处闪烁
-                            float texEdge = fwidth(texAlpha) * 1.0;
-                            arrowLayer = smoothstep(0.5 - texEdge, 0.5 + texEdge, texAlpha);
+                        float lodFade = smoothstep(minSpacing, maxSpacing, spacingPixels);
+
+                        // 只有在纹理范围内且 LOD 允许时才采样
+                        if (texX >= 0.0 && texX <= 1.0 && lodFade > 0.01) {
+                            // 采样纹理 Alpha
+                            float texA = texture2D(uTexture, vec2(texX, vUv.y)).a;
+                            arrowAlpha = texA * lodFade;
                         }
                     }
 
-                    // --- 3. 颜色混合 ---
-                    vec3 c = mix(vColor, white, arrowLayer);
-                    gl_FragColor = vec4(c, bodyAlpha);
+                    // --- 3. 合成颜色 ---
+                    vec3 finalColor = mix(vColor, vec3(1.0), arrowAlpha);
+                    gl_FragColor = vec4(finalColor, bodyAlpha);
                 }
             `,
             transparent: true,
-            vertexColors: false, // 我们自己传递 aColor
             side: THREE.DoubleSide,
-            extensions: {
-                derivatives: true // 必须启用，用于 fwidth
-            }
+            extensions: { derivatives: true }
         });
 
         this._buildGeometry();
@@ -228,59 +230,57 @@ export class NavLine {
         const { trafficData, zOffset, cornerRadius } = this.config;
         
         const curve = createRoundedPath(this.originalPoints, cornerRadius);
-        const totalLen = curve.getLength();
-        // 增加采样密度以保证投影精度
-        const segments = Math.max(200, Math.floor(totalLen * 5)); 
-        const points = curve.getSpacedPoints(segments);
-        this._curvePoints = points; // 保存用于 update 投影
+        const points = curve.getSpacedPoints(Math.floor(curve.getLength() * 2));
         const count = points.length;
 
-        // Arrays
         const positions = [];
         const tangents = [];
         const offsets = []; 
         const uvs = [];
         const colors = [];
-        const screenDists = []; // 初始全为0，由 update 填充
+        const pathDists = []; 
         const isCaps = [];
         const indices = [];
 
         let vertexIndex = 0;
 
-        // --- Helper: Add Cap ---
-        const addCap = (center, direction, color) => {
-            const capSegments = 32; // 增加段数让圆头更圆
+        // 计算累积世界距离
+        const dists = [0];
+        for(let i=1; i<count; i++) {
+            dists.push(dists[i-1] + points[i].distanceTo(points[i-1]));
+        }
+
+        const addCap = (center, direction, color, dist) => {
+            const capSegments = 16;
             const tanX = direction.x;
             const tanY = direction.y;
             const tanZ = direction.z;
 
-            // Center Vertex
+            // Cap Center
             positions.push(center.x, center.y, center.z + zOffset);
             tangents.push(tanX, tanY, tanZ);
             offsets.push(0, 0); 
             uvs.push(0, 0);
             colors.push(color.r, color.g, color.b);
-            screenDists.push(0); // Cap 的 screenDist 设为0或继承端点，这里暂存占位
+            pathDists.push(dist); 
             isCaps.push(1);
             
             const centerIdx = vertexIndex++;
 
             for (let i = 0; i <= capSegments; i++) {
                 const theta = -Math.PI / 2 + (Math.PI * i) / capSegments;
-                const sin = Math.sin(theta); // Right/Side
-                const cos = Math.cos(theta); // Forward
+                const sin = Math.sin(theta); 
+                const cos = Math.cos(theta); 
 
                 positions.push(center.x, center.y, center.z + zOffset);
                 tangents.push(tanX, tanY, tanZ);
                 offsets.push(sin, cos); 
                 uvs.push(sin, cos);
                 colors.push(color.r, color.g, color.b);
-                screenDists.push(0);
+                pathDists.push(dist);
                 isCaps.push(1);
 
-                if (i > 0) {
-                    indices.push(centerIdx, vertexIndex - 1, vertexIndex);
-                }
+                if (i > 0) indices.push(centerIdx, vertexIndex - 1, vertexIndex);
                 vertexIndex++;
             }
         };
@@ -288,15 +288,10 @@ export class NavLine {
         const startTangent = new THREE.Vector3().subVectors(points[1], points[0]).normalize();
         const endTangent = new THREE.Vector3().subVectors(points[count-1], points[count-2]).normalize();
 
-        // 1. Start Cap (Arrow pointing OUT -> tangent negated)
-        // 注意：之前的逻辑修复了 Cap 朝向，这里保持一致
-        addCap(points[0], startTangent.clone().negate(), this._getColor(0, trafficData));
-
-        // 2. Body
-        // 我们记录 Body 顶点的起始索引，方便后续 update 更新 screenDist
-        this._bodyVertexStart = vertexIndex;
-        this._bodyVertexCount = count * 2;
-
+        // Caps
+        addCap(points[0], startTangent.clone().negate(), this._getColor(0, trafficData), dists[0]);
+        
+        // Body
         for (let i = 0; i < count; i++) {
             let tangent;
             if (i === 0) tangent = startTangent;
@@ -304,37 +299,36 @@ export class NavLine {
             else tangent = new THREE.Vector3().subVectors(points[i+1], points[i-1]).normalize();
 
             const c = this._getColor(i / (count - 1), trafficData);
+            const d = dists[i];
 
             // Left
             positions.push(points[i].x, points[i].y, points[i].z + zOffset);
             tangents.push(tangent.x, tangent.y, tangent.z);
             offsets.push(1, 0);
-            uvs.push(0, 0); // u:0=Left
+            uvs.push(0, 0); 
             colors.push(c.r, c.g, c.b);
-            screenDists.push(0); // 待更新
+            pathDists.push(d);
             isCaps.push(0);
 
             // Right
             positions.push(points[i].x, points[i].y, points[i].z + zOffset);
             tangents.push(tangent.x, tangent.y, tangent.z);
             offsets.push(-1, 0);
-            uvs.push(0, 1); // u:0=Right (vUv.y used for gradient) - Wait, uv.y is width.
-            // Shader uses abs(vUv.y - 0.5). So lets map 0..1
-            // Left: 0, Right: 1. Center is 0.5.
+            uvs.push(0, 1);
             colors.push(c.r, c.g, c.b);
-            screenDists.push(0); // 待更新
+            pathDists.push(d);
             isCaps.push(0);
 
             if (i < count - 1) {
-                const base = this._bodyVertexStart + i * 2;
+                const base = vertexIndex;
                 indices.push(base, base+1, base+2);
                 indices.push(base+1, base+3, base+2);
+                vertexIndex += 2;
             }
-            vertexIndex += 2;
         }
+        vertexIndex += 2;
 
-        // 3. End Cap
-        addCap(points[count-1], endTangent, this._getColor(1, trafficData));
+        addCap(points[count-1], endTangent, this._getColor(1, trafficData), dists[count-1]);
 
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -342,11 +336,9 @@ export class NavLine {
         geometry.setAttribute('aOffset', new THREE.Float32BufferAttribute(offsets, 2));
         geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
         geometry.setAttribute('aColor', new THREE.Float32BufferAttribute(colors, 3));
-        geometry.setAttribute('aScreenDist', new THREE.Float32BufferAttribute(screenDists, 1));
+        geometry.setAttribute('aPathDist', new THREE.Float32BufferAttribute(pathDists, 1));
         geometry.setAttribute('aIsCap', new THREE.Float32BufferAttribute(isCaps, 1));
         geometry.setIndex(indices);
-
-        // 为了防止剔除（因为顶点Shader会大幅偏移顶点），设大包围球
         geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), 10000);
 
         this.mesh = new THREE.Mesh(geometry, this.material);
@@ -362,93 +354,23 @@ export class NavLine {
         return trafficData[trafficData.length-1].color;
     }
 
-    /**
-     * 更新导航线状态
-     * @param {number} deltaTime 时间增量
-     * @param {THREE.Camera} camera 相机对象 (必须提供，用于计算屏幕距离)
-     */
-    update(deltaTime, camera) {
+    update(deltaTime) {
         if (!this.mesh || !this.material) return;
         
-        // 1. 更新动画偏移
-        // 假设 speed 是 "像素/秒" (例如 60 px/s)
-        const pxSpeed = 100.0; 
-        this._accumulatedTime += deltaTime * pxSpeed; 
+        this._accumulatedTime += deltaTime * this.config.speed;
         this.material.uniforms.uOffset.value = this._accumulatedTime;
 
-        // 2. 更新分辨率
         this._resolution.set(window.innerWidth, window.innerHeight);
         this.material.uniforms.uResolution.value.copy(this._resolution);
-
-        // 3. [关键] 计算屏幕空间距离 (Screen Space Distance)
-        if (camera) {
-            this._updateScreenDistances(camera);
-        }
+    }
+    
+    setLodBias(value) {
+        if(this.material) this.material.uniforms.uLodBias.value = value;
     }
 
-    _updateScreenDistances(camera) {
-        const points = this._curvePoints;
-        const count = points.length;
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        const halfW = width / 2;
-        const halfH = height / 2;
-
-        const screenDistAttr = this.mesh.geometry.attributes.aScreenDist;
-        const array = screenDistAttr.array;
-        
-        // 投影向量缓存
-        const vec = new THREE.Vector3();
-        
-        let accumulatedDist = 0;
-        let prevScreenPos = new THREE.Vector2();
-        let prevValid = false;
-
-        for (let i = 0; i < count; i++) {
-            // 复制点坐标并应用视图矩阵
-            vec.copy(points[i]);
-            vec.applyMatrix4(camera.matrixWorldInverse); 
-            
-            // 检查点是否在相机后面 (View Space 中, 相机看向 -Z, 所以 Z > 0 是后面)
-            // 留一点 buffer (-0.1) 避免近裁面的闪烁
-            const isBehind = vec.z > -0.1;
-            
-            // 投影到 NDC
-            vec.applyMatrix4(camera.projectionMatrix); 
-
-            // 计算屏幕坐标
-            const screenX = vec.x * halfW + halfW;
-            const screenY = vec.y * halfH + halfH;
-
-            // 如果点在相机后面，我们不累加距离，但我们需要填充属性以防 crash
-            // 更重要的是，如果当前点或上一个点在相机后面，两点之间的屏幕距离是无效的
-            if (i > 0) {
-                if (!isBehind && prevValid) {
-                    const dx = screenX - prevScreenPos.x;
-                    const dy = screenY - prevScreenPos.y;
-                    const dist = Math.sqrt(dx*dx + dy*dy);
-                    accumulatedDist += dist;
-                } else {
-                    // 如果跨越了相机平面，或者在后面，保持距离不变
-                    // 这会“冻结”不可见部分的纹理坐标，防止无限大数值导致整个纹理闪烁
-                }
-            }
-
-            prevScreenPos.set(screenX, screenY);
-            prevValid = !isBehind;
-
-            // 更新 Mesh 属性
-            const idx = this._bodyVertexStart + i * 2;
-            array[idx] = accumulatedDist;
-            array[idx + 1] = accumulatedDist;
-        }
-
-        screenDistAttr.needsUpdate = true;
-    }
-
-    setArrowSpacing(px) {
-        this.config.arrowSpacing = px;
-        this.material.uniforms.uSpacing.value = px;
+    setArrowSpacing(value) {
+        this.config.arrowSpacing = value;
+        if(this.material) this.material.uniforms.uSpacing.value = value;
     }
 
     dispose() {
